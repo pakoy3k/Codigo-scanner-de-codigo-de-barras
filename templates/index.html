@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Consulta de alumnos</title>
+  <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: system-ui, sans-serif;
+      color: #172033;
+      background: #f3f6fb;
+    }
+
+    body {
+      box-sizing: border-box;
+      max-width: 760px;
+      margin: 0 auto;
+      padding: 2rem 1rem;
+    }
+
+    main {
+      padding: 1.5rem;
+      border-radius: 16px;
+      background: white;
+      box-shadow: 0 8px 30px #17203312;
+    }
+
+    h1 { margin-top: 0; }
+    #reader { max-width: 520px; margin: 1.5rem auto; }
+    #resultado { min-height: 1.5rem; }
+    .alumno {
+      padding: 1rem;
+      border-left: 4px solid #16845b;
+      border-radius: 6px;
+      background: #effaf5;
+    }
+    .error { color: #a12622; }
+    .ayuda { color: #536078; }
+    dt { margin-top: 0.6rem; font-weight: 700; }
+    dd { margin-left: 0; }
+    label { display: block; margin-top: 1.25rem; font-weight: 700; }
+    select { width: 100%; max-width: 520px; padding: 0.65rem; font: inherit; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Consulta de alumnos</h1>
+    <p class="ayuda">Permite el acceso a la cámara y apunta al código de barras o QR de la matrícula.</p>
+    <label for="camara">Cámara</label>
+    <select id="camara" disabled>
+      <option>Buscando cámaras...</option>
+    </select>
+    <div id="reader" aria-label="Cámara para escanear códigos"></div>
+    <section id="resultado" aria-live="polite"></section>
+  </main>
+
+  <script>
+    const resultado = document.querySelector("#resultado");
+    const selectorCamara = document.querySelector("#camara");
+    const lector = new Html5Qrcode("reader", {
+      formatsToSupport: [
+        Html5QrcodeSupportedFormats.QR_CODE,
+        Html5QrcodeSupportedFormats.CODE_128,
+        Html5QrcodeSupportedFormats.CODE_39,
+        Html5QrcodeSupportedFormats.EAN_13,
+        Html5QrcodeSupportedFormats.EAN_8,
+        Html5QrcodeSupportedFormats.UPC_A,
+        Html5QrcodeSupportedFormats.UPC_E,
+        Html5QrcodeSupportedFormats.ITF
+      ],
+      verbose: false
+    });
+    let consultando = false;
+    let ultimaMatricula = "";
+    let ultimoEscaneo = 0;
+    let escaneando = false;
+    let cambiandoCamara = false;
+
+    async function consultar(matricula) {
+      if (consultando || (matricula === ultimaMatricula && Date.now() - ultimoEscaneo < 3000)) {
+        return;
+      }
+
+      consultando = true;
+      ultimaMatricula = matricula;
+      ultimoEscaneo = Date.now();
+      resultado.textContent = "Consultando matrícula...";
+
+      try {
+        const respuesta = await fetch("/api/alumnos/consultar", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ matricula })
+        });
+        const datos = await respuesta.json();
+
+        if (respuesta.status === 404) {
+          resultado.innerHTML = "";
+          const mensaje = document.createElement("p");
+          mensaje.className = "error";
+          mensaje.textContent = `No se encontró la matrícula ${datos.matricula}.`;
+          resultado.append(mensaje);
+        } else if (!respuesta.ok) {
+          throw new Error(datos.error || "No se pudo consultar la matrícula.");
+        } else {
+          const alumno = datos.alumno;
+          resultado.innerHTML = `
+            <div class="alumno">
+              <strong>Alumno encontrado</strong>
+              <dl>
+                <dt>Matrícula</dt><dd>${escapeHtml(alumno.matricula)}</dd>
+                <dt>Nombre</dt><dd>${escapeHtml(alumno.nombre)}</dd>
+                <dt>Carrera</dt><dd>${escapeHtml(alumno.carrera)}</dd>
+                <dt>Estatus</dt><dd>${escapeHtml(alumno.estatus)}</dd>
+              </dl>
+            </div>`;
+        }
+      } catch (error) {
+        resultado.innerHTML = "";
+        const mensaje = document.createElement("p");
+        mensaje.className = "error";
+        mensaje.textContent = error.message;
+        resultado.append(mensaje);
+      } finally {
+        consultando = false;
+      }
+    }
+
+    function escapeHtml(valor) {
+      const elemento = document.createElement("span");
+      elemento.textContent = valor;
+      return elemento.innerHTML;
+    }
+
+    function mostrarError(error) {
+      resultado.innerHTML = "";
+      const mensaje = document.createElement("p");
+      mensaje.className = "error";
+      mensaje.textContent = `No se pudo iniciar la cámara: ${error.message}`;
+      resultado.append(mensaje);
+    }
+
+    async function seleccionarCamara() {
+      if (cambiandoCamara || !selectorCamara.value) {
+        return;
+      }
+
+      cambiandoCamara = true;
+      selectorCamara.disabled = true;
+      try {
+        if (escaneando) {
+          await lector.stop();
+          escaneando = false;
+        }
+        await lector.start(
+          selectorCamara.value,
+          { fps: 10, qrbox: { width: 280, height: 160 } },
+          texto => consultar(texto.trim()),
+          () => {}
+        );
+        escaneando = true;
+      } catch (error) {
+        escaneando = false;
+        mostrarError(error);
+      } finally {
+        cambiandoCamara = false;
+        selectorCamara.disabled = false;
+      }
+    }
+
+    selectorCamara.addEventListener("change", seleccionarCamara);
+
+    Html5Qrcode.getCameras()
+      .then(camaras => {
+        if (!camaras.length) {
+          throw new Error("No se encontró una cámara disponible.");
+        }
+
+        selectorCamara.innerHTML = "";
+        camaras.forEach((camara, indice) => {
+          const opcion = document.createElement("option");
+          opcion.value = camara.id;
+          opcion.textContent = camara.label || `Cámara ${indice + 1}`;
+          selectorCamara.append(opcion);
+        });
+
+        const camaraTrasera = camaras.find(camara =>
+          /back|rear|environment|trasera|posterior/i.test(camara.label)
+        );
+        selectorCamara.value = (camaraTrasera || camaras[0]).id;
+        return seleccionarCamara();
+      })
+      .catch(mostrarError);
+  </script>
+</body>
+</html>
